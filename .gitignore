@@ -1,0 +1,18 @@
+# Secrets — never commit
+.env
+
+# Local state
+history.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/

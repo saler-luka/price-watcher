@@ -1,0 +1,16 @@
+{
+  "products": [
+    {
+      "name": "Head Coello Pro 2026 (Tennis Zone)",
+      "url": "https://tennis-zone.hr/padel/reketi/head/head-coello-pro-2026/ST109769",
+      "selector": "div.product-main-price-display",
+      "price_source": "selector"
+    },
+    {
+      "name": "Adidas Metalbone 2026 (Tennis Zone)",
+      "url": "https://tennis-zone.hr/padel/reketi/adidas/adidas-metalbone-2026/ST107802",
+      "selector": "div.product-main-price-display",
+      "price_source": "selector"
+    }
+  ]
+}
