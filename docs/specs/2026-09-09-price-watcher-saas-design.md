@@ -33,7 +33,7 @@ because it is what to re-examine if a constraint changes.
 | 3 | **AWS Cognito** for auth | Never store a password; reset/verify flows for free; already familiar. Accepted seam: an AWS dependency for auth only, while the app runs elsewhere. |
 | 4 | **All Python** | `parse_price`, the three extraction strategies and the candidate ranker port over *verbatim*, including the cases verified against live pages. Rewriting them would mean re-earning trust in them. |
 | 5 | **FastAPI + Jinja + HTMX** | No JS build step, no second language, no API designed against your own client. |
-| 6 | **Headless browser for discovery, plain HTTP for polling** | Discovery happens once per shop; polling happens constantly. Put the expense where it occurs least. |
+| 6 | **Static HTML first, rendered DOM only on failure** | Amended 2026-09-10; see §13. Most shops put the price in the HTML, so a browser is the exception rather than the default. Escalating on failure also makes `needs_render` a byproduct of what actually happened instead of a guess. |
 | 7 | **One container + Postgres** | One deploy, one log stream. SQL makes cross-user URL dedupe and registry queries natural; DynamoDB makes them fiddly. |
 
 ### Non-goals for the MVP
@@ -168,7 +168,9 @@ URL in
 
 ### Discovery (once per shop)
 
-1. Render the page with Playwright.
+1. Fetch the static HTML. Only if it yields no usable price candidate,
+   re-fetch with Playwright and use the rendered DOM (see "Render
+   escalation" below).
 2. Detect the platform from fingerprints (for Shopware 6:
    `window.activeNavigationId`, `/bundles/storefront/`, `robots.txt` naming it).
 3. Collect every price candidate — JSON-LD, the four `product:*` meta
@@ -187,9 +189,42 @@ crawler trusting structured data would report 223.90 for a racket costing
 and wrong silently. One human answer per shop converts an unreliable heuristic
 into a durable fact.
 
-`needs_render` is decided here: if the confirmed price is present in the static
-HTML, every later poll uses a plain HTTP request and only genuinely JS-only
-shops pay browser cost repeatedly.
+`needs_render` is not guessed: it records whether rendering was actually
+required to find the price. A shop confirmed from static HTML gets
+`needs_render = false` and every later poll is a plain HTTP request; only
+genuinely JS-only shops pay browser cost repeatedly.
+
+### Render escalation
+
+One rule, used by both discovery and polling: **try the static HTML, and
+escalate to a rendered DOM only when the static attempt fails.**
+
+What counts as failure depends on what we are looking for:
+
+- **During discovery** (no selector yet) — failure means the static HTML
+  produced *no usable candidate at all*. That is the signature of a
+  client-side-rendered price.
+- **During polling** (a stored selector) — failure means the stored selector
+  did not match, or matched something that does not parse.
+
+Escalation is what distinguishes two failures that look identical but need
+opposite responses:
+
+| Static | Rendered | Meaning | Response |
+|---|---|---|---|
+| fails | succeeds with the same selector | the shop moved to client-side rendering | set `needs_render = true`, carry on, no human needed |
+| fails | fails too | genuine selector rot — the shop redesigned | flag the shop, ask for re-confirmation |
+
+The first row is worth the complexity on its own: a shop switching to
+client-side rendering would otherwise look exactly like a broken selector and
+cost a confirmation round-trip, when it needs nothing from anyone.
+
+Two guards, because a browser launch is expensive:
+
+- **Escalate at most once per check.** Never render twice for one product in
+  one run.
+- **Once a shop is `flagged`, stop escalating** for it. A permanently dead
+  product must not launch a browser twice a day forever.
 
 ---
 
@@ -233,7 +268,12 @@ number from somewhere else.
    requests to the same host**, **at most 4 concurrent fetches** across all
    hosts, and `robots.txt` honoured per domain. These are starting values, and
    the per-host gap is the one to raise if a shop complains.
-3. One fetch per product → one `price_points` row.
+3. One fetch per product → one `price_points` row. The fetch follows the
+   render-escalation rule from §5: static HTML, and a rendered DOM only if the
+   stored selector fails to match. A shop whose selector fails statically but
+   resolves in the rendered DOM has moved to client-side rendering — set
+   `needs_render = true` and continue; it needs no human. A shop that fails
+   both ways has genuinely rotted: flag it and stop escalating for it.
 4. For each watching user: diff against `watches.last_reported_price`, build
    their report, send it, and advance their baseline only on success.
 
@@ -414,3 +454,33 @@ Recorded so they are not rediscovered as surprises:
    run fully standalone?
 4. Currency conversion — store and display the shop's own currency only, or
    normalise for users watching across currencies?
+
+---
+
+## 13. Amendments
+
+The convention in `docs/README.md` is that approved specs are append-only, and
+a changed decision goes into a new dated spec that supersedes the old one. That
+rule exists to preserve the record of decisions **that were acted upon**.
+
+Amendments made before any implementation began are recorded here instead,
+because spawning a near-duplicate spec for a document nothing was built on
+would obscure the record rather than protect it. **Once Phase 1 starts, this
+section closes and the append-only rule applies literally.**
+
+### 2026-09-10 — static HTML first, render on failure
+
+Decision 6 previously read "headless browser for discovery, plain HTTP for
+polling", which meant every new shop paid for a browser launch whether it
+needed one or not. It now reads: try static HTML, escalate to a rendered DOM
+only on failure. See §5, "Render escalation".
+
+Consequences:
+
+- Most shops never launch a browser at all. `tennis-zone.hr` serves its price
+  in static HTML, so discovery there is a single HTTP request.
+- `needs_render` becomes an observation rather than a guess — it is true
+  exactly when rendering was required. This closes a gap recorded in the
+  Phase 1 plan, where `confirm_and_add` could only ever write `false`.
+- A shop that migrates to client-side rendering now self-heals instead of
+  presenting as a broken selector.

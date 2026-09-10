@@ -1661,7 +1661,7 @@ def render(url: str, timeout_ms: int = 20000) -> str:
 Run: `pytest tests/test_fetch.py -v`
 Expected: PASS — 5 passed
 
-Then install the browser once so Task 11 can render: `playwright install chromium`
+Then install the browser once so Task 10 can render: `playwright install chromium`
 Expected: exit 0.
 
 - [ ] **Step 5: Commit**
@@ -1673,14 +1673,217 @@ git commit -m "feat: fetcher with enforced per-host politeness"
 
 ---
 
-## Task 10: Add-product orchestration
+## Task 10: Price resolution with render escalation
+
+Static HTML first; a rendered DOM only when static fails. This is where spec §5
+"Render escalation" lives, and it is what makes `needs_render` an observation
+rather than a guess.
+
+**Files:**
+- Create: `pricewatcher/resolve.py`
+- Test: `tests/test_resolve.py`
+
+**Interfaces:**
+- Consumes: `from_selector`, `soup_of` (Task 4); `rank_candidates` (Task 6); `FetchResult`, `render` (Task 9).
+- Produces:
+  - `Resolution` dataclass: `price: float | None`, `used_render: bool`, `html: str`, `status: str` (`'ok'` | `'no_price'` | `'blocked'`), `http_status: int | None`
+  - `resolve_price(fetcher, url: str, selector: str | None, *, allow_render: bool = True, renderer=render) -> Resolution`
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_resolve.py`:
+
+```python
+from pricewatcher.fetch import FetchResult
+from pricewatcher.resolve import Resolution, resolve_price
+from tests.conftest import load_fixture
+
+URL = "https://tennis-zone.hr/p/1"
+SELECTOR = "div.product-main-price-display"
+JS_ONLY = "<html><body><div id='app'></div></body></html>"
+
+
+class StubFetcher:
+    def __init__(self, html, status=200):
+        self.html, self.status = html, status
+        self.calls = 0
+
+    def get(self, url):
+        self.calls += 1
+        return FetchResult(self.status, self.html, url,
+                           self.status in (401, 403, 429))
+
+
+def _renderer(html):
+    calls = []
+
+    def render(url, timeout_ms=20000):
+        calls.append(url)
+        return html
+
+    render.calls = calls
+    return render
+
+
+def test_static_hit_never_launches_a_browser():
+    r = _renderer("<html>should not be used</html>")
+    res = resolve_price(StubFetcher(load_fixture("tennis_zone_head.html")),
+                        URL, SELECTOR, renderer=r)
+    assert isinstance(res, Resolution)
+    assert (res.price, res.used_render, res.status) == (248.90, False, "ok")
+    assert r.calls == []
+
+
+def test_escalates_to_render_when_selector_missing_statically():
+    r = _renderer(load_fixture("tennis_zone_head.html"))
+    res = resolve_price(StubFetcher(JS_ONLY), URL, SELECTOR, renderer=r)
+    assert res.price == 248.90
+    assert res.used_render is True
+    assert res.status == "ok"
+    assert r.calls == [URL]
+
+
+def test_no_price_when_both_static_and_rendered_fail():
+    r = _renderer(JS_ONLY)
+    res = resolve_price(StubFetcher(JS_ONLY), URL, SELECTOR, renderer=r)
+    assert res.price is None
+    assert res.status == "no_price"
+    assert res.used_render is True
+
+
+def test_renders_at_most_once_per_call():
+    r = _renderer(JS_ONLY)
+    resolve_price(StubFetcher(JS_ONLY), URL, SELECTOR, renderer=r)
+    assert len(r.calls) == 1
+
+
+def test_allow_render_false_never_renders():
+    r = _renderer(load_fixture("tennis_zone_head.html"))
+    res = resolve_price(StubFetcher(JS_ONLY), URL, SELECTOR,
+                        allow_render=False, renderer=r)
+    assert res.price is None
+    assert res.used_render is False
+    assert r.calls == []
+
+
+def test_blocked_fetch_does_not_escalate():
+    r = _renderer(load_fixture("tennis_zone_head.html"))
+    res = resolve_price(StubFetcher("denied", status=403), URL, SELECTOR,
+                        renderer=r)
+    assert res.status == "blocked"
+    assert res.http_status == 403
+    assert r.calls == []
+
+
+def test_discovery_mode_succeeds_when_static_has_any_candidate():
+    r = _renderer(JS_ONLY)
+    res = resolve_price(StubFetcher(load_fixture("tennis_zone_head.html")),
+                        URL, None, renderer=r)
+    assert res.status == "ok"
+    assert res.used_render is False
+    assert r.calls == []
+
+
+def test_discovery_mode_escalates_when_static_has_no_candidates():
+    r = _renderer(load_fixture("tennis_zone_head.html"))
+    res = resolve_price(StubFetcher(JS_ONLY), URL, None, renderer=r)
+    assert res.status == "ok"
+    assert res.used_render is True
+
+
+def test_returns_the_html_actually_used():
+    """Callers rank candidates and detect the platform on this HTML, so it must
+    be the rendered DOM whenever rendering happened."""
+    r = _renderer(load_fixture("tennis_zone_head.html"))
+    res = resolve_price(StubFetcher(JS_ONLY), URL, SELECTOR, renderer=r)
+    assert "product-main-price-display" in res.html
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_resolve.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'pricewatcher.resolve'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+`pricewatcher/resolve.py`:
+
+```python
+"""Static HTML first, rendered DOM only on failure (spec section 5).
+
+The escalation is what separates two failures that look identical: a shop that
+moved to client-side rendering (static fails, rendered works - self-healing,
+needs no human) from a shop that redesigned (both fail - genuine rot, needs
+re-confirmation). Rendering is attempted at most once per call.
+"""
+from dataclasses import dataclass
+
+from pricewatcher.extract import from_selector, soup_of
+from pricewatcher.fetch import render as default_render
+from pricewatcher.ranking import rank_candidates
+
+
+@dataclass(frozen=True)
+class Resolution:
+    price: float | None
+    used_render: bool
+    html: str
+    status: str                 # 'ok' | 'no_price' | 'blocked'
+    http_status: int | None
+
+
+def _attempt(html: str, selector: str | None) -> float | None:
+    """Price if this HTML satisfies what we are looking for, else None."""
+    if selector:
+        return from_selector(soup_of(html), selector)
+    # Discovery mode: any usable candidate counts as success.
+    candidates = rank_candidates(html)
+    return candidates[0].price if candidates else None
+
+
+def resolve_price(fetcher, url: str, selector: str | None, *,
+                  allow_render: bool = True,
+                  renderer=default_render) -> Resolution:
+    result = fetcher.get(url)
+    if result.blocked:
+        return Resolution(None, False, "", "blocked", result.status)
+
+    price = _attempt(result.html, selector)
+    if price is not None:
+        return Resolution(price, False, result.html, "ok", result.status)
+
+    if not allow_render:
+        return Resolution(None, False, result.html, "no_price", result.status)
+
+    rendered = renderer(url)
+    price = _attempt(rendered, selector)
+    status = "ok" if price is not None else "no_price"
+    return Resolution(price, True, rendered, status, result.status)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `pytest tests/test_resolve.py -v`
+Expected: PASS — 9 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pricewatcher/resolve.py tests/test_resolve.py
+git commit -m "feat: static-first price resolution with render escalation"
+```
+
+---
+
+## Task 11: Add-product orchestration
 
 **Files:**
 - Create: `pricewatcher/products.py`
 - Test: `tests/test_products.py`
 
 **Interfaces:**
-- Consumes: `canonicalize_url`, `domain_of` (Task 2); `Candidate`, `from_selector`, `soup_of` (Task 4); `detect_platform` (Task 5); `rank_candidates`, `distrusted_sources`, `has_bulk_price_block` (Task 6); models (Task 7); `get_shop`, `confirm_shop`, `flag_shop` (Task 8); `FetchResult` (Task 9).
+- Consumes: `canonicalize_url`, `domain_of` (Task 2); `Candidate`, `from_selector`, `soup_of` (Task 4); `detect_platform` (Task 5); `rank_candidates`, `distrusted_sources` (Task 6); models (Task 7); `get_shop`, `confirm_shop`, `flag_shop` (Task 8); `FetchResult` (Task 9); `resolve_price`, `Resolution` (Task 10).
+- **Uses `resolve_price` for every fetch**, never `fetcher.get` directly, so escalation and `needs_render` are handled in one place. Pass `allow_render=False` when the shop is already `flagged`, per the spec's guard against launching a browser for a permanently dead product.
 - Produces:
   - `AddResult` dataclass: `status: str` (`'added'` | `'needs_confirmation'` | `'blocked'`), `product_id: uuid.UUID | None`, `price: float | None`, `candidates: list[Candidate]`, `domain: str`, `canonical_url: str`
   - `add_product(session, fetcher, url: str) -> AddResult`
@@ -1709,6 +1912,10 @@ class StubFetcher:
         self.urls.append(url)
         return FetchResult(self.status, self.html, url,
                            self.status in (401, 403, 429))
+
+
+def _never_render(url, timeout_ms=20000):
+    raise AssertionError("should not have needed a browser")
 
 
 def _confirm_tennis_zone(session):
@@ -1780,6 +1987,50 @@ def test_blocked_fetch_reports_blocked_and_records_the_check(session):
     r = add_product(session, f, HEAD_URL)
     assert r.status == "blocked"
     assert session.query(Check).one().status == "blocked"
+
+
+def test_confirming_records_needs_render_false_for_a_static_shop(session):
+    f = StubFetcher(load_fixture("tennis_zone_head.html"))
+    confirm_and_add(session, f, HEAD_URL, "div.product-main-price-display",
+                    renderer=_never_render)
+    assert get_shop(session, "tennis-zone.hr").needs_render is False
+
+
+def test_confirming_records_needs_render_true_for_a_js_shop(session):
+    f = StubFetcher("<html><body><div id='app'></div></body></html>")
+    confirm_and_add(session, f, HEAD_URL, "div.product-main-price-display",
+                    renderer=lambda url, timeout_ms=20000:
+                        load_fixture("tennis_zone_head.html"))
+    assert get_shop(session, "tennis-zone.hr").needs_render is True
+
+
+def test_shop_moving_to_client_side_rendering_self_heals(session):
+    """Static fails, rendered works with the same selector: not rot."""
+    _confirm_tennis_zone(session)
+    f = StubFetcher("<html><body><div id='app'></div></body></html>")
+    r = add_product(session, f, HEAD_URL,
+                    renderer=lambda url, timeout_ms=20000:
+                        load_fixture("tennis_zone_head.html"))
+    assert r.status == "added"
+    assert r.price == 248.90
+    shop = get_shop(session, "tennis-zone.hr")
+    assert shop.needs_render is True
+    assert shop.status == "trusted"        # not flagged - nothing is broken
+
+
+def test_a_flagged_shop_does_not_launch_a_browser(session):
+    from pricewatcher.registry import flag_shop
+    _confirm_tennis_zone(session)
+    flag_shop(session, "tennis-zone.hr", "already known broken")
+    f = StubFetcher("<html><body>nothing</body></html>")
+    calls = []
+
+    def counting_renderer(url, timeout_ms=20000):
+        calls.append(url)
+        return ""
+
+    add_product(session, f, HEAD_URL, renderer=counting_renderer)
+    assert calls == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1808,6 +2059,8 @@ from pricewatcher.extract import Candidate, from_selector, soup_of
 from pricewatcher.platforms import detect_platform
 from pricewatcher.ranking import distrusted_sources, rank_candidates
 from pricewatcher.registry import confirm_shop, flag_shop, get_shop
+from pricewatcher.resolve import resolve_price
+from pricewatcher.fetch import render as default_render
 
 
 @dataclass
@@ -1838,71 +2091,86 @@ def _upsert_product(session, canonical_url: str, domain: str) -> Product:
     return product
 
 
-def add_product(session, fetcher, url: str) -> AddResult:
+def add_product(session, fetcher, url: str, *,
+                renderer=default_render) -> AddResult:
     canonical = canonicalize_url(url)
     domain = domain_of(canonical)
     shop = get_shop(session, domain)
 
-    result = fetcher.get(canonical)
-    if result.blocked:
-        product = session.query(Product).filter_by(canonical_url=canonical).one_or_none()
+    trusted = shop is not None and shop.status == "trusted" and shop.selector
+    selector = shop.selector if trusted else None
+    # Never launch a browser for a shop already known to be broken.
+    allow_render = not (shop is not None and shop.status == "flagged")
+
+    res = resolve_price(fetcher, canonical, selector,
+                        allow_render=allow_render, renderer=renderer)
+
+    if res.status == "blocked":
+        product = session.query(Product).filter_by(
+            canonical_url=canonical).one_or_none()
         if shop is not None and product is None:
             product = _upsert_product(session, canonical, domain)
         if product is not None:
-            _record_check(session, product.id, "blocked", result.status)
+            _record_check(session, product.id, "blocked", res.http_status)
         return AddResult("blocked", domain, canonical,
                          product_id=product.id if product else None)
 
-    if shop is None or shop.status != "trusted" or not shop.selector:
+    if not trusted:
         return AddResult("needs_confirmation", domain, canonical,
-                         candidates=rank_candidates(result.html))
+                         candidates=rank_candidates(res.html))
 
-    price = from_selector(soup_of(result.html), shop.selector)
     product = _upsert_product(session, canonical, domain)
 
-    if price is None:
+    if res.price is None:
         flag_shop(session, domain, "stored selector stopped parsing")
-        _record_check(session, product.id, "no_price", result.status)
+        _record_check(session, product.id, "no_price", res.http_status)
         return AddResult("needs_confirmation", domain, canonical,
                          product_id=product.id,
-                         candidates=rank_candidates(result.html))
+                         candidates=rank_candidates(res.html))
 
-    session.add(PricePoint(product_id=product.id, price=price,
+    # Static failed but the rendered DOM resolved: the shop moved to
+    # client-side rendering. Self-heal instead of asking a human.
+    if res.used_render and not shop.needs_render:
+        shop.needs_render = True
+        session.flush()
+
+    session.add(PricePoint(product_id=product.id, price=res.price,
                            currency=shop.currency, source=shop.price_source))
-    _record_check(session, product.id, "ok", result.status)
+    _record_check(session, product.id, "ok", res.http_status)
     return AddResult("added", domain, canonical,
-                     product_id=product.id, price=price)
+                     product_id=product.id, price=res.price)
 
 
 def confirm_and_add(session, fetcher, url: str, selector: str,
-                    currency: str = "EUR") -> AddResult:
+                    currency: str = "EUR", *,
+                    renderer=default_render) -> AddResult:
     canonical = canonicalize_url(url)
     domain = domain_of(canonical)
 
-    result = fetcher.get(canonical)
-    if result.blocked:
+    res = resolve_price(fetcher, canonical, selector, renderer=renderer)
+    if res.status == "blocked":
         return AddResult("blocked", domain, canonical)
-
-    price = from_selector(soup_of(result.html), selector)
-    if price is None:
+    if res.price is None:
         raise ValueError(
             f"selector {selector!r} does not parse to a price on {canonical}")
 
-    decimal_style = "comma" if "," in _price_text(result.html, selector) else "dot"
+    decimal_style = "comma" if "," in _price_text(res.html, selector) else "dot"
 
     confirm_shop(
         session, domain=domain, selector=selector, currency=currency,
-        decimal_style=decimal_style, needs_render=False,
-        platform=detect_platform(result.html),
-        distrusted=distrusted_sources(result.html), confirmed_on=canonical,
+        decimal_style=decimal_style,
+        # Observed, not assumed: true exactly when rendering was required.
+        needs_render=res.used_render,
+        platform=detect_platform(res.html),
+        distrusted=distrusted_sources(res.html), confirmed_on=canonical,
     )
 
     product = _upsert_product(session, canonical, domain)
-    session.add(PricePoint(product_id=product.id, price=price,
+    session.add(PricePoint(product_id=product.id, price=res.price,
                            currency=currency, source="selector"))
-    _record_check(session, product.id, "ok", result.status)
+    _record_check(session, product.id, "ok", res.http_status)
     return AddResult("added", domain, canonical,
-                     product_id=product.id, price=price)
+                     product_id=product.id, price=res.price)
 
 
 def _price_text(html: str, selector: str) -> str:
@@ -1913,7 +2181,7 @@ def _price_text(html: str, selector: str) -> str:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_products.py -v`
-Expected: PASS — 7 passed
+Expected: PASS — 12 passed
 
 Then run the whole suite: `pytest -v`
 Expected: PASS — all tests from Tasks 1-10, 0 failures.
@@ -1927,7 +2195,7 @@ git commit -m "feat: add-product orchestration with flag-not-guess on selector r
 
 ---
 
-## Task 11: CLI harness
+## Task 12: CLI harness
 
 This is the Phase 1 done-criterion: adding a URL and confirming a price, end to end, against a real shop and a real database.
 
@@ -2101,13 +2369,13 @@ git commit -m "feat: Phase 1 CLI harness"
 
 ## Self-Review
 
-**Spec coverage.** §4 data model → Task 7. §4 canonicalization → Task 2. §5 add flow, all three branches → Task 10. §5 discovery/platform → Tasks 4, 5. §6 ranking and the trap rule → Task 6. §7 politeness limits → Task 9. §9 blocked-IP handling → Task 9 (`blocked` flag) and Task 10 (`blocked` status), with the manual check in Task 3 Step 4. §9 registry conflict guard → Task 8. §9 selector rot → Task 10. §10 evidence numbers → asserted in Tasks 4 and 6.
+**Spec coverage.** §4 data model → Task 7. §4 canonicalization → Task 2. §5 add flow, all three branches → Task 11. §5 discovery/platform → Tasks 4, 5. §5 render escalation → Task 10. §6 ranking and the trap rule → Task 6. §7 politeness limits → Task 9. §7 escalation on polling → Task 10. §9 blocked-IP handling → Task 9 (`blocked` flag) and Tasks 10-11 (`blocked` status), with the manual check in Task 3 Step 4. §9 registry conflict guard → Task 8. §9 selector rot → Task 11. §10 evidence numbers → asserted in Tasks 4 and 6.
 
 **Deliberately not covered here**, and correct to defer: `users`/`watches` behaviour (Phase 2), the scheduler and notifications (Phase 3), "hit me" cache window and quotas (Phase 4), Telegram (Phase 5), and the `robots.txt` fetch-and-obey step, which belongs with the scheduler that does repeat fetching rather than with a one-shot add. Phase 3's plan must open with it.
 
-**Gaps found and closed while reviewing:** the `needs_render` field is written by `confirm_and_add` but always as `False`, because Phase 1's harness only renders on an explicit `--render` flag and does not yet plumb that decision into the registry. Phase 2 must set it from whether the price was found in static HTML. Recorded here rather than silently left.
+**Previously recorded gap, now closed.** An earlier version of this plan noted that `confirm_and_add` could only ever write `needs_render=False`, and deferred the fix to Phase 2. The render-escalation amendment (spec §13, 2026-09-10) resolves it inside Phase 1: `Resolution.used_render` records whether rendering was actually required, and Task 11 writes that value straight into the registry. `needs_render` is now observed, never assumed.
 
-**Type consistency.** `Candidate` fields are used identically in Tasks 4, 6, 10 and 11. `FetchResult` is constructed in Task 9 and stubbed with the same four fields in Task 10. `AddResult.status` uses the same three literals in Tasks 10 and 11. `confirm_shop` is called with the full keyword set in Tasks 8 and 10.
+**Type consistency.** `Candidate` fields are used identically in Tasks 4, 6, 10, 11 and 12. `FetchResult` is constructed in Task 9 and stubbed with the same four fields in Tasks 10 and 11. `Resolution.status` and `AddResult.status` share the literals `'ok'`/`'blocked'` and `'no_price'`/`'needs_confirmation'` respectively — they are deliberately different vocabularies, one describing a fetch and one describing a user-facing outcome. `confirm_shop` is called with the full keyword set in Tasks 8 and 11.
 
 ---
 

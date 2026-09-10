@@ -149,9 +149,12 @@ defend: **SQLAlchemy 2.0 + Alembic** rather than raw SQL, and **tests require a
 real Postgres** (Docker Compose, port 5433) because `citext` and `jsonb` are
 Postgres-specific.
 
-One known gap, recorded rather than hidden: `confirm_and_add` always writes
-`needs_render=False`. Phase 2 must set it from whether the price was found in
-static HTML.
+Amended 2026-09-10: **read the price from static HTML first, and fall back to
+the rendered browser DOM only if that fails.** Most shops never need a browser.
+This also closed a gap that had been deferred to Phase 2 — `needs_render` is
+now observed (true exactly when rendering was required) rather than assumed,
+and a shop that migrates to client-side rendering self-heals instead of looking
+like a broken selector. See spec §5 "Render escalation" and §13.
 
 ## Environment and gotchas
 
