@@ -166,16 +166,17 @@ small shop is both rude and the fastest way to get the IP blocked.
 
 ## Where this goes next
 
-Right now state lives in `history.json` next to the script. If you want to turn
-this into the monitoring micro-SaaS idea, the shape barely changes:
+This CLI is Layer 2 of a planned two-layer service. **The design is not
+described here** — it lives in one place so it cannot drift:
 
-- `history.json` → DynamoDB table, partition key = user_id, sort key = url
-- the loop → Lambda on an EventBridge schedule
-- `send_email` → SNS, so alerts can fan out to email/SMS/webhook
-- add a signup form and a `products` table keyed by user
+- `docs/specs/2026-09-09-price-watcher-saas-design.md` — the approved design
+- `docs/plans/2026-09-09-phase-1-crawler-and-registry.md` — the first phase
+- `HANDOFF.md` — current state and what to do next
 
-The scraping and parsing logic is the part that stays identical, and it's the
-part that's already done.
+See `docs/README.md` for how documentation is organised.
+
+The scraping and parsing logic in this file is the part that carries over
+unchanged, and it is the part that is already done.
 
 ## Limitations
 

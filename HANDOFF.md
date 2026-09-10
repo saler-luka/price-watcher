@@ -21,6 +21,7 @@ price watcher/
 ├── README.md                # how to operate the CLI
 ├── HANDOFF.md               # this file
 └── docs/
+    ├── README.md            # how documentation is organised
     ├── specs/2026-09-09-price-watcher-saas-design.md    # approved design
     └── plans/2026-09-09-phase-1-crawler-and-registry.md # 11 tasks, TDD, ready
 ```
@@ -186,6 +187,25 @@ and run `python main.py` to confirm delivery. Nothing else needs changing.
 
 Never commit `.env`. Before any push, check both that it is unstaged *and* that
 no staged file's content contains the password.
+
+## Where documentation lives
+
+**This repository is the only source of truth.** No Jira, no Confluence, no
+issue tracker. `docs/README.md` describes the layout and conventions; the short
+version:
+
+- **This file** is the only one guaranteed current. Everything else is a dated
+  snapshot of what was decided on that date.
+- Approved specs are append-only. A changed decision means a new dated spec
+  that supersedes the old one, never a silent edit.
+- The checkboxes in the current plan are the task tracker. There is no second
+  system on purpose.
+
+**Ignore the Claude artifact** published on 2026-09-09 (a two-layer
+architecture page). It is an unmaintained snapshot, now banner-marked as
+superseded. It predates most of the design and originally stated the bulk-block
+trap rule was impossible, which was wrong; that one claim has been corrected in
+place and the page will not be touched again.
 
 ## Standing guidance
 
