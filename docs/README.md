@@ -10,7 +10,7 @@ issue tracker, no wiki. If it is not in git, it is not a decision.
 | 1 | `../HANDOFF.md` | Current state, what is verified, what to do next |
 | 2 | `../README.md` | How to operate the working CLI today |
 | 3 | `specs/` | Approved design decisions and their rationale |
-| 4 | `plans/` | Implementation plans, task by task |
+| 4 | `plans/` | Implementation plans, task by task. Execute in phase order (0, then 1), not date order |
 | 5 | `notes/` | Findings that are not a design decision |
 
 ## The one rule that prevents drift

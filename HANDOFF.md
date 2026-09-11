@@ -11,7 +11,8 @@ first, then `docs/specs/`, then `docs/plans/`. Conventions in `docs/README.md`.
 | **Design** | Approved. `docs/specs/2026-09-09-price-watcher-saas-design.md`, amended 2026-09-10 (§13). |
 | **Phase 1 plan** | Approved, ready to execute. 12 tasks, 60 steps, **0 done**. |
 | **Phase 1 code** | **None exists.** No `pricewatcher/` package, no tests, no `pyproject.toml`. The repo is `main.py` plus documentation. |
-| **Next action** | **Phase 0** (below), then Task 1 of the plan. |
+| **Phase 0 plan** | Written 2026-09-11, ready to execute. `docs/plans/2026-09-11-phase-0-hosted-ip-validation.md` — 5 tasks, 20 steps, **0 done**. Tasks 2-4 need the owner (a cloud account, SSH). |
+| **Next action** | **Execute the Phase 0 plan**, starting at its Task 1. Phase 1 waits on its Task 5. |
 
 If any of these rows is no longer true, update this table before doing
 anything else.
@@ -37,6 +38,7 @@ price watcher/
 └── docs/
     ├── README.md            # how documentation is organised
     ├── specs/2026-09-09-price-watcher-saas-design.md    # approved design
+    ├── plans/2026-09-11-phase-0-hosted-ip-validation.md  # 5 tasks, do this first
     └── plans/2026-09-09-phase-1-crawler-and-registry.md # 12 tasks, TDD, ready
 ```
 
@@ -120,9 +122,14 @@ datacenter IP being refused by Cloudflare, while a home connection got 200 with
 no special headers. A hosted crawler *is* a datacenter IP, so the service may
 be blocked on the very shop that motivated the project.
 
-Spin up the cheapest candidate host, request one product page, destroy it. Ten
-minutes. If it 403s, hosting changes, or residential egress is needed (which
-changes both cost and legal posture), or the set of viable shops shrinks.
+**There is now a plan for this:**
+`docs/plans/2026-09-11-phase-0-hosted-ip-validation.md`. It builds a tested
+probe script, runs it from the home connection as a control, then from Hetzner
+(and Fly.io only if Hetzner is blocked), records every result verbatim in
+`docs/notes/`, and ends by writing the decision into spec §13 and updating this
+file. Three outcomes are pre-written; the executor copies the one the data
+supports. Under the worst outcome, Phase 1 stays blocked until the owner
+chooses a product shape.
 
 Also measured: `bike24.de` and `notebooksbilliger.de` returned 403 to a
 *residential* IP, so some shops refuse unknown clients regardless of origin.
