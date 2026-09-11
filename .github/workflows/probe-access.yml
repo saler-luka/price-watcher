@@ -1,0 +1,44 @@
+# Phase 0 vantage point: run the access probe from a datacenter IP.
+# Manual trigger only - never on a schedule. The probe hits the shop twice.
+name: probe-access
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "Tag for where this ran (goes into the JSONL)"
+        default: github-actions-azure
+        required: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run probe (stdlib only, no install)
+        id: probe
+        run: |
+          set +e
+          python3 --version
+          python3 scripts/probe_access.py --label "${{ inputs.label }}" | tee probe.jsonl
+          code=${PIPESTATUS[0]}
+          echo "exit=$code" | tee -a probe.jsonl
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Show result
+        run: |
+          echo '### Probe output (${{ inputs.label }})' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat probe.jsonl >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ inputs.label }}
+          path: probe.jsonl
+
+      - name: Fail the job if not served (after the output is recorded)
+        if: steps.probe.outputs.code != '0'
+        run: exit 1
