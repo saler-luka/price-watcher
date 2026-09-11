@@ -28,6 +28,13 @@ A shop counts as **served** from a vantage point only if all three hold:
 
 A 200 with a Cloudflare challenge page is a **block**, not a success. This is the mistake the probe exists to prevent.
 
+> **Execution note (2026-09-11):** condition 3 is evaluated only when condition 2
+> fails. The control run showed the real page contains the bare string
+> `captcha` (Shopware feature flags + `captcha.js`), so checking markers first
+> misclassified a genuine page. The price element is the shop's own DOM and an
+> interstitial never carries it, so its presence is decisive. Details in
+> `docs/notes/2026-09-11-hosted-ip-findings.md`.
+
 ---
 
 ## File Structure
@@ -60,7 +67,7 @@ The verdict is the whole point. Test it before wiring it to the network.
   - `classify(status: int, body: str, expect_marker: str) -> str` returning one of `'served'`, `'blocked'`, `'challenge'`, `'not_product_page'`, `'error'`
   - `CHALLENGE_MARKERS: tuple[str, ...]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `tests/test_probe_access.py`:
 
@@ -109,12 +116,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest tests.test_probe_access -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'scripts.probe_access'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `scripts/__init__.py` and `tests/__init__.py`: empty files.
 
@@ -275,7 +282,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest tests.test_probe_access -v`
 Expected: PASS — 8 tests OK
@@ -300,7 +307,7 @@ The home connection is the known-good baseline (it returned 200 on 2026-09-09). 
 - Consumes: `scripts/probe_access.py` from Task 1.
 - Produces: the findings note, with the control section filled.
 
-- [ ] **Step 1: Run the probe from the owner's machine**
+- [x] **Step 1: Run the probe from the owner's machine**
 
 Run, from the project directory:
 
@@ -313,7 +320,7 @@ Expected: `exit=0`, and two JSON lines each with `"verdict": "served"`, `"status
 
 If either verdict is not `served`, **stop**. Either the shop changed since 2026-09-09 (re-run `python main.py --debug-url <url>` to check the marker still exists), or `classify` has a bug. Do not proceed to a cloud run with a probe that fails its own control.
 
-- [ ] **Step 2: Create the findings note with the control result**
+- [x] **Step 2: Create the findings note with the control result**
 
 `docs/notes/2026-09-11-hosted-ip-findings.md`:
 
@@ -365,6 +372,13 @@ git commit -m "docs: Phase 0 control measurement from home connection"
 Hetzner is the primary candidate: cheapest always-on box in the EU, and its IP ranges are well-known to bot-protection vendors, so it is the *pessimistic* test. If Hetzner is served, most hosts will be.
 
 This task is executed by the owner, not an agent — it requires a Hetzner account and a payment method. The agent's job is to make it a copy-paste exercise.
+
+> **Execution note (2026-09-11):** the owner chose not to rent a server. The
+> datacenter vantage point is a GitHub Actions runner instead
+> (`.github/workflows/probe-access.yml`, label `github-actions-azure`). Steps
+> 1-3 below are replaced by: push the branch, run the workflow manually, copy
+> the JSONL from the job summary. Step 4-5 apply unchanged. The limit of the
+> substitution is recorded in the findings note.
 
 **Files:**
 - Modify: `docs/notes/2026-09-11-hosted-ip-findings.md`
